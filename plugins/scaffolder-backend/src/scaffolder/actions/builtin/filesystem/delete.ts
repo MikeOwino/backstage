@@ -13,10 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { createTemplateAction } from '../../createTemplateAction';
+
+import { createTemplateAction } from '@backstage/plugin-scaffolder-node';
 import { InputError } from '@backstage/errors';
-import { resolveSafeChildPath } from '@backstage/backend-common';
+import { resolveSafeChildPath } from '@backstage/backend-plugin-api';
 import fs from 'fs-extra';
+import globby from 'globby';
+import { examples } from './delete.examples';
 
 /**
  * Creates new action that enables deletion of files and directories in the workspace.
@@ -26,6 +29,7 @@ export const createFilesystemDeleteAction = () => {
   return createTemplateAction<{ files: string[] }>({
     id: 'fs:delete',
     description: 'Deletes files and directories from the workspace',
+    examples,
     schema: {
       input: {
         required: ['files'],
@@ -49,14 +53,20 @@ export const createFilesystemDeleteAction = () => {
       }
 
       for (const file of ctx.input.files) {
-        const filepath = resolveSafeChildPath(ctx.workspacePath, file);
+        const safeFilepath = resolveSafeChildPath(ctx.workspacePath, file);
+        const resolvedPaths = await globby(safeFilepath, {
+          cwd: ctx.workspacePath,
+          absolute: true,
+        });
 
-        try {
-          await fs.remove(filepath);
-          ctx.logger.info(`File ${filepath} deleted successfully`);
-        } catch (err) {
-          ctx.logger.error(`Failed to delete file ${filepath}:`, err);
-          throw err;
+        for (const filepath of resolvedPaths) {
+          try {
+            await fs.remove(filepath);
+            ctx.logger.info(`File ${filepath} deleted successfully`);
+          } catch (err) {
+            ctx.logger.error(`Failed to delete file ${filepath}:`, err);
+            throw err;
+          }
         }
       }
     },

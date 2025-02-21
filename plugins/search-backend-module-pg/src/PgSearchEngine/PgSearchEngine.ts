@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-import { PluginDatabaseManager } from '@backstage/backend-common';
-import { SearchEngine } from '@backstage/plugin-search-common';
+import { SearchEngine } from '@backstage/plugin-search-backend-node';
 import {
   SearchQuery,
   IndexableResultSet,
@@ -29,6 +28,7 @@ import {
 } from '../database';
 import { v4 as uuid } from 'uuid';
 import { Config } from '@backstage/config';
+import { DatabaseService, LoggerService } from '@backstage/backend-plugin-api';
 
 /**
  * Search query that the Postgres search engine understands.
@@ -45,6 +45,7 @@ export type ConcretePgSearchQuery = {
  */
 export type PgSearchQueryTranslatorOptions = {
   highlightOptions: PgSearchHighlightOptions;
+  normalization?: number;
 };
 
 /**
@@ -61,7 +62,8 @@ export type PgSearchQueryTranslator = (
  * @public
  */
 export type PgSearchOptions = {
-  database: PluginDatabaseManager;
+  database: DatabaseService;
+  logger?: LoggerService;
 };
 
 /**
@@ -82,12 +84,19 @@ export type PgSearchHighlightOptions = {
 
 /** @public */
 export class PgSearchEngine implements SearchEngine {
+  private readonly logger?: LoggerService;
   private readonly highlightOptions: PgSearchHighlightOptions;
+  private readonly indexerBatchSize: number;
+  private readonly normalization: number;
 
   /**
    * @deprecated This will be marked as private in a future release, please us fromConfig instead
    */
-  constructor(private readonly databaseStore: DatabaseStore, config: Config) {
+  constructor(
+    private readonly databaseStore: DatabaseStore,
+    config: Config,
+    logger?: LoggerService,
+  ) {
     const uuidTag = uuid();
     const highlightConfig = config.getOptionalConfig(
       'search.pg.highlightOptions',
@@ -107,18 +116,56 @@ export class PgSearchEngine implements SearchEngine {
         highlightConfig?.getOptionalString('fragmentDelimiter') ?? ' ... ',
     };
     this.highlightOptions = highlightOptions;
+    this.indexerBatchSize =
+      config.getOptionalNumber('search.pg.indexerBatchSize') ?? 1000;
+
+    this.normalization = this.getNormalizationValue(config);
+    this.logger = logger;
+  }
+
+  private getNormalizationValue(config: Config) {
+    const normalizationConfig =
+      config.getOptional('search.pg.normalization') ?? 0;
+    if (typeof normalizationConfig === 'number') {
+      return normalizationConfig;
+    } else if (typeof normalizationConfig === 'string') {
+      return this.evaluateBitwiseOrExpression(normalizationConfig);
+    }
+    this.logger?.error(
+      `Unknown normalization configuration: ${normalizationConfig}`,
+    );
+
+    return 0;
+  }
+
+  private evaluateBitwiseOrExpression(expression: string) {
+    const tokens = expression.split('|').map(token => token.trim());
+
+    const numbers = tokens.map(token => {
+      const num = parseInt(token, 10);
+      if (isNaN(num)) {
+        this.logger?.error(
+          `Unknown expression for normalization: ${expression}`,
+        );
+        return 0;
+      }
+      return num;
+    });
+    return numbers.reduce((acc, num) => acc | num, 0);
   }
 
   /**
-   * @deprecated This will be removed in a future release, please us fromConfig instead
+   * @deprecated This will be removed in a future release, please use fromConfig instead
    */
   static async from(options: {
-    database: PluginDatabaseManager;
+    database: DatabaseService;
     config: Config;
+    logger?: LoggerService;
   }): Promise<PgSearchEngine> {
     return new PgSearchEngine(
       await DatabaseDocumentStore.create(options.database),
       options.config,
+      options.logger,
     );
   }
 
@@ -126,10 +173,11 @@ export class PgSearchEngine implements SearchEngine {
     return new PgSearchEngine(
       await DatabaseDocumentStore.create(options.database),
       config,
+      options.logger,
     );
   }
 
-  static async supported(database: PluginDatabaseManager): Promise<boolean> {
+  static async supported(database: DatabaseService): Promise<boolean> {
     return await DatabaseDocumentStore.supported(await database.getClient());
   }
 
@@ -142,6 +190,7 @@ export class PgSearchEngine implements SearchEngine {
     const offset = page * pageSize;
     // We request more result to know whether there is another page
     const limit = pageSize + 1;
+    const normalization = options.normalization || 0;
 
     return {
       pgQuery: {
@@ -155,6 +204,7 @@ export class PgSearchEngine implements SearchEngine {
         types: query.types,
         offset,
         limit,
+        normalization,
         options: options.highlightOptions,
       },
       pageSize,
@@ -167,15 +217,17 @@ export class PgSearchEngine implements SearchEngine {
 
   async getIndexer(type: string) {
     return new PgSearchEngineIndexer({
-      batchSize: 1000,
+      batchSize: this.indexerBatchSize,
       type,
       databaseStore: this.databaseStore,
+      logger: this.logger?.child({ documentType: type }),
     });
   }
 
   async query(query: SearchQuery): Promise<IndexableResultSet> {
     const { pgQuery, pageSize } = this.translator(query, {
       highlightOptions: this.highlightOptions,
+      normalization: this.normalization,
     });
 
     const rows = await this.databaseStore.transaction(async tx =>

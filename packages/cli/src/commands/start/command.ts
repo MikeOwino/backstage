@@ -14,27 +14,57 @@
  * limitations under the License.
  */
 
+import fs from 'fs-extra';
 import { OptionValues } from 'commander';
-import { startBackend } from './startBackend';
-import { startFrontend } from './startFrontend';
+import { resolve as resolvePath } from 'node:path';
+import { PackageRole } from '@backstage/cli-node';
 import { findRoleFromCommand } from '../../lib/role';
+import { startBackend, startBackendPlugin } from './startBackend';
+import { startFrontend } from './startFrontend';
+import { ForwardedError } from '@backstage/errors';
 
 export async function command(opts: OptionValues): Promise<void> {
   const role = await findRoleFromCommand(opts);
 
+  if (opts.link) {
+    const dir = resolvePath(opts.link);
+    if (!fs.pathExistsSync(dir)) {
+      throw new Error(
+        `Invalid workspace link, directory does not exist: ${dir}`,
+      );
+    }
+    const pkgJson = await fs
+      .readJson(resolvePath(dir, 'package.json'))
+      .catch(error => {
+        throw new ForwardedError(
+          'Failed to read package.json in linked workspace',
+          error,
+        );
+      });
+
+    if (!pkgJson.workspaces) {
+      throw new Error(
+        `Invalid workspace link, directory is not a workspace: ${dir}`,
+      );
+    }
+  }
+
   const options = {
     configPaths: opts.config as string[],
     checksEnabled: Boolean(opts.check),
-    inspectEnabled: Boolean(opts.inspect),
-    inspectBrkEnabled: Boolean(opts.inspectBrk),
+    linkedWorkspace: opts.link,
+    inspectEnabled: opts.inspect,
+    inspectBrkEnabled: opts.inspectBrk,
+    require: opts.require,
   };
 
   switch (role) {
     case 'backend':
+      return startBackend(options);
     case 'backend-plugin':
     case 'backend-plugin-module':
     case 'node-library':
-      return startBackend(options);
+      return startBackendPlugin(options);
     case 'frontend':
       return startFrontend({
         ...options,
@@ -45,6 +75,13 @@ export async function command(opts: OptionValues): Promise<void> {
     case 'frontend-plugin':
     case 'frontend-plugin-module':
       return startFrontend({ entry: 'dev/index', ...options });
+    case 'frontend-dynamic-container' as PackageRole: // experimental
+      return startFrontend({
+        entry: 'src/index',
+        ...options,
+        skipOpenBrowser: true,
+        isModuleFederationRemote: true,
+      });
     default:
       throw new Error(
         `Start command is not supported for package role '${role}'`,
