@@ -9,8 +9,8 @@ import {
   DeferredEntity,
   EntityProvider,
   EntityProviderConnection,
-  parseEntityYaml,
-} from '@backstage/plugin-catalog-backend';
+} from '@backstage/plugin-catalog-node';
+import { parseEntityYaml } from '@backstage/plugin-catalog-backend';
 import bodyParser from 'body-parser';
 import express from 'express';
 import Router from 'express-promise-router';
@@ -61,12 +61,12 @@ export class ImmediateEntityProvider implements EntityProvider {
     this.entityValidator = entitySchemaValidator();
   }
 
-  /** {@inheritdoc @backstage/plugin-catalog-backend#EntityProvider.getProviderName} */
+  /** {@inheritdoc @backstage/plugin-catalog-node#EntityProvider.getProviderName} */
   getProviderName() {
     return `ImmediateEntityProvider`;
   }
 
-  /** {@inheritdoc @backstage/plugin-catalog-backend#EntityProvider.connect} */
+  /** {@inheritdoc @backstage/plugin-catalog-node#EntityProvider.connect} */
   async connect(connection: EntityProviderConnection) {
     this.connection = connection;
   }

@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 import {
-  PluginDatabaseManager,
+  DatabaseService,
   resolvePackagePath,
-} from '@backstage/backend-common';
+} from '@backstage/backend-plugin-api';
 import { IndexableDocument } from '@backstage/plugin-search-common';
 import { Knex } from 'knex';
 import {
@@ -35,7 +35,7 @@ const migrationsDir = resolvePackagePath(
 /** @public */
 export class DatabaseDocumentStore implements DatabaseStore {
   static async create(
-    database: PluginDatabaseManager,
+    database: DatabaseService,
   ): Promise<DatabaseDocumentStore> {
     const knex = await database.getClient();
     try {
@@ -117,12 +117,16 @@ export class DatabaseDocumentStore implements DatabaseStore {
       .ignore();
 
     // Delete all documents that we don't expect (deleted and changed)
+    const rowsToDelete = tx<RawDocumentRow>('documents')
+      .select('documents.hash')
+      .leftJoin<RawDocumentRow>('documents_to_insert', {
+        'documents.hash': 'documents_to_insert.hash',
+      })
+      .whereNull('documents_to_insert.hash');
+
     await tx<RawDocumentRow>('documents')
       .where({ type })
-      .whereNotIn(
-        'hash',
-        tx<RawDocumentRow>('documents_to_insert').select('hash'),
-      )
+      .whereIn('hash', rowsToDelete)
       .delete();
   }
 
@@ -144,10 +148,18 @@ export class DatabaseDocumentStore implements DatabaseStore {
     tx: Knex.Transaction,
     searchQuery: PgSearchQuery,
   ): Promise<DocumentResultRow[]> {
-    const { types, pgTerm, fields, offset, limit, options } = searchQuery;
+    const {
+      types,
+      pgTerm,
+      fields,
+      offset,
+      limit,
+      normalization = 0,
+      options,
+    } = searchQuery;
     // TODO(awanlin): We should make the language a parameter so that we can support more then just english
     // Builds a query like:
-    // SELECT ts_rank_cd(body, query) AS rank, type, document,
+    // SELECT ts_rank_cd(body, query, 0) AS rank, type, document,
     // ts_headline('english', document, query) AS highlight
     // FROM documents, to_tsquery('english', 'consent') query
     // WHERE query @@ body AND (document @> '{"kind": "API"}')
@@ -171,9 +183,13 @@ export class DatabaseDocumentStore implements DatabaseStore {
       Object.keys(fields).forEach(key => {
         const value = fields[key];
         const valueArray = Array.isArray(value) ? value : [value];
-        const valueCompare = valueArray
+        const fieldValueCompare = valueArray
           .map(v => ({ [key]: v }))
           .map(v => JSON.stringify(v));
+        const arrayValueCompare = valueArray
+          .map(v => ({ [key]: [v] }))
+          .map(v => JSON.stringify(v));
+        const valueCompare = [...fieldValueCompare, ...arrayValueCompare];
         query.whereRaw(
           `(${valueCompare.map(() => 'document @> ?').join(' OR ')})`,
           valueCompare,
@@ -186,7 +202,7 @@ export class DatabaseDocumentStore implements DatabaseStore {
     if (pgTerm && options.useHighlight) {
       const headlineOptions = `MaxWords=${options.maxWords}, MinWords=${options.minWords}, ShortWord=${options.shortWord}, HighlightAll=${options.highlightAll}, MaxFragments=${options.maxFragments}, FragmentDelimiter=${options.fragmentDelimiter}, StartSel=${options.preTag}, StopSel=${options.postTag}`;
       query
-        .select(tx.raw('ts_rank_cd(body, query) AS "rank"'))
+        .select(tx.raw(`ts_rank_cd(body, query, ${normalization}) AS "rank"`))
         .select(
           tx.raw(
             `ts_headline(\'english\', document, query, '${headlineOptions}') as "highlight"`,
@@ -195,7 +211,7 @@ export class DatabaseDocumentStore implements DatabaseStore {
         .orderBy('rank', 'desc');
     } else if (pgTerm && !options.useHighlight) {
       query
-        .select(tx.raw('ts_rank_cd(body, query) AS "rank"'))
+        .select(tx.raw(`ts_rank_cd(body, query, ${normalization}) AS "rank"`))
         .orderBy('rank', 'desc');
     } else {
       query.select(tx.raw('1 as rank'));

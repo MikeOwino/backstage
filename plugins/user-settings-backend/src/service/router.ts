@@ -14,43 +14,18 @@
  * limitations under the License.
  */
 
-import { errorHandler, PluginDatabaseManager } from '@backstage/backend-common';
-import { AuthenticationError, InputError } from '@backstage/errors';
-import { IdentityApi } from '@backstage/plugin-auth-node';
+import { InputError } from '@backstage/errors';
 import express, { Request } from 'express';
 import Router from 'express-promise-router';
-import { DatabaseUserSettingsStore } from '../database/DatabaseUserSettingsStore';
 import { UserSettingsStore } from '../database/UserSettingsStore';
+import { SignalsService } from '@backstage/plugin-signals-node';
+import { UserSettingsSignal } from '@backstage/plugin-user-settings-common';
+import { HttpAuthService } from '@backstage/backend-plugin-api';
 
-/**
- * @public
- */
-export interface RouterOptions {
-  database: PluginDatabaseManager;
-  identity: IdentityApi;
-}
-
-/**
- * Create the user settings backend routes.
- *
- * @public
- */
-export async function createRouter(
-  options: RouterOptions,
-): Promise<express.Router> {
-  const userSettingsStore = await DatabaseUserSettingsStore.create({
-    database: options.database,
-  });
-
-  return await createRouterInternal({
-    userSettingsStore,
-    identity: options.identity,
-  });
-}
-
-export async function createRouterInternal(options: {
-  identity: IdentityApi;
+export async function createRouter(options: {
+  httpAuth: HttpAuthService;
   userSettingsStore: UserSettingsStore;
+  signals: SignalsService;
 }): Promise<express.Router> {
   const router = Router();
   router.use(express.json());
@@ -59,13 +34,10 @@ export async function createRouterInternal(options: {
    * Helper method to extract the userEntityRef from the request.
    */
   const getUserEntityRef = async (req: Request): Promise<string> => {
-    // throws an AuthenticationError in case the token exists but is invalid
-    const identity = await options.identity.getIdentity({ request: req });
-    if (!identity) {
-      throw new AuthenticationError(`Missing token in 'authorization' header`);
-    }
-
-    return identity.identity.userEntityRef;
+    const credentials = await options.httpAuth.credentials(req, {
+      allow: ['user'],
+    });
+    return credentials.principal.userEntityRef;
   };
 
   // get a single value
@@ -104,6 +76,14 @@ export async function createRouterInternal(options: {
       key,
     });
 
+    if (options.signals) {
+      await options.signals.publish<UserSettingsSignal>({
+        recipients: { type: 'user', entityRef: userEntityRef },
+        channel: `user-settings`,
+        message: { type: 'key-changed', key },
+      });
+    }
+
     res.json(setting);
   });
 
@@ -113,11 +93,16 @@ export async function createRouterInternal(options: {
     const { bucket, key } = req.params;
 
     await options.userSettingsStore.delete({ userEntityRef, bucket, key });
+    if (options.signals) {
+      await options.signals.publish<UserSettingsSignal>({
+        recipients: { type: 'user', entityRef: userEntityRef },
+        channel: 'user-settings',
+        message: { type: 'key-deleted', key },
+      });
+    }
 
     res.status(204).end();
   });
-
-  router.use(errorHandler());
 
   return router;
 }

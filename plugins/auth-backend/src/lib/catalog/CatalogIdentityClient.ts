@@ -14,7 +14,12 @@
  * limitations under the License.
  */
 
-import { Logger } from 'winston';
+import {
+  AuthService,
+  DiscoveryService,
+  HttpAuthService,
+  LoggerService,
+} from '@backstage/backend-plugin-api';
 import { ConflictError, NotFoundError } from '@backstage/errors';
 import { CatalogApi } from '@backstage/catalog-client';
 import {
@@ -24,20 +29,38 @@ import {
   stringifyEntityRef,
   UserEntity,
 } from '@backstage/catalog-model';
-import { TokenManager } from '@backstage/backend-common';
+import {
+  TokenManager,
+  createLegacyAuthAdapters,
+} from '@backstage/backend-common';
 
 /**
  * A catalog client tailored for reading out identity data from the catalog.
  *
  * @public
+ * @deprecated Use the provided `AuthResolverContext` instead, see https://backstage.io/docs/auth/identity-resolver#building-custom-resolvers
  */
 export class CatalogIdentityClient {
   private readonly catalogApi: CatalogApi;
-  private readonly tokenManager: TokenManager;
+  private readonly auth: AuthService;
 
-  constructor(options: { catalogApi: CatalogApi; tokenManager: TokenManager }) {
+  constructor(options: {
+    catalogApi: CatalogApi;
+    tokenManager?: TokenManager;
+    discovery: DiscoveryService;
+    auth?: AuthService;
+    httpAuth?: HttpAuthService;
+  }) {
     this.catalogApi = options.catalogApi;
-    this.tokenManager = options.tokenManager;
+
+    const { auth } = createLegacyAuthAdapters({
+      auth: options.auth,
+      httpAuth: options.httpAuth,
+      discovery: options.discovery,
+      tokenManager: options.tokenManager,
+    });
+
+    this.auth = auth;
   }
 
   /**
@@ -55,7 +78,11 @@ export class CatalogIdentityClient {
       filter[`metadata.annotations.${key}`] = value;
     }
 
-    const { token } = await this.tokenManager.getToken();
+    const { token } = await this.auth.getPluginRequestToken({
+      onBehalfOf: await this.auth.getOwnServiceCredentials(),
+      targetPluginId: 'catalog',
+    });
+
     const { items } = await this.catalogApi.getEntities({ filter }, { token });
 
     if (items.length !== 1) {
@@ -78,7 +105,7 @@ export class CatalogIdentityClient {
    */
   async resolveCatalogMembership(query: {
     entityRefs: string[];
-    logger?: Logger;
+    logger?: LoggerService;
   }): Promise<string[]> {
     const { entityRefs, logger } = query;
     const resolvedEntityRefs = entityRefs
@@ -101,7 +128,12 @@ export class CatalogIdentityClient {
       'metadata.namespace': ref.namespace,
       'metadata.name': ref.name,
     }));
-    const { token } = await this.tokenManager.getToken();
+
+    const { token } = await this.auth.getPluginRequestToken({
+      onBehalfOf: await this.auth.getOwnServiceCredentials(),
+      targetPluginId: 'catalog',
+    });
+
     const entities = await this.catalogApi
       .getEntities({ filter }, { token })
       .then(r => r.items);

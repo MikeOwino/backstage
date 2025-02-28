@@ -14,7 +14,10 @@
  * limitations under the License.
  */
 
-import { AuthProviderFactory, SignInResolver } from './types';
+import {
+  AuthProviderFactory,
+  SignInResolver,
+} from '@backstage/plugin-auth-node';
 
 /**
  * Creates a standardized representation of an integration with a third-party
@@ -24,6 +27,7 @@ import { AuthProviderFactory, SignInResolver } from './types';
  * supplies built-in sign-in resolvers for the specific provider.
  *
  * @public
+ * @deprecated Migrate the auth plugin to the new backend system https://backstage.io/docs/backend-system/building-backends/migrating#the-auth-plugin
  */
 export function createAuthProviderIntegration<
   TCreateOptions extends unknown[],
